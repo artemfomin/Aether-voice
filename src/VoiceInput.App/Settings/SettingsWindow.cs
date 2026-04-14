@@ -4,12 +4,13 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using VoiceInput.Core.Config;
+using VoiceInput.Core.History;
 
 namespace VoiceInput.App.Settings;
 
 /// <summary>
 /// Settings window for Voice Input. Fluent Design, dark theme.
-/// Contains tabs: General, Speech Recognition, Audio, Hotkey, Appearance, AI Processing.
+/// Contains tabs: General, Speech Recognition, Audio, Hotkey, Appearance, AI Processing, History.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class SettingsWindow : Window
@@ -17,7 +18,7 @@ public sealed class SettingsWindow : Window
     private readonly AppConfig _config;
     private readonly Action<AppConfig> _onSave;
 
-    public SettingsWindow(AppConfig config, Action<AppConfig> onSave)
+    public SettingsWindow(AppConfig config, Action<AppConfig> onSave, IHistoryStore? historyStore = null)
     {
         _config = config;
         _onSave = onSave;
@@ -42,6 +43,11 @@ public sealed class SettingsWindow : Window
         tabControl.Items.Add(CreateHotkeyTab());
         tabControl.Items.Add(CreateAppearanceTab());
         tabControl.Items.Add(CreateLlmTab());
+
+        if (historyStore != null)
+        {
+            tabControl.Items.Add(new TabItem { Header = "History", Content = new HistoryView(historyStore) });
+        }
 
         Content = tabControl;
     }

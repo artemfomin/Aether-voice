@@ -1,6 +1,12 @@
 using System.Runtime.Versioning;
 using Microsoft.Extensions.DependencyInjection;
+using VoiceInput.Core.Audio;
 using VoiceInput.Core.Config;
+using VoiceInput.Core.History;
+using VoiceInput.Core.Injection;
+using VoiceInput.Core.Llm;
+using VoiceInput.Core.Stt;
+using VoiceInput.Core.Stt.Providers;
 
 namespace VoiceInput.Core;
 
@@ -17,12 +23,28 @@ public static class ServiceCollectionExtensions
     [SupportedOSPlatform("windows")]
     public static IServiceCollection AddVoiceInputCore(this IServiceCollection services)
     {
+        // Config
         services.AddSingleton<IConfigStore, JsonConfigStore>();
+        services.AddSingleton(sp => sp.GetRequiredService<IConfigStore>().Load());
 
-        // Future services will be registered here:
-        // services.AddSingleton<ISttProvider, ...>();
-        // services.AddSingleton<IHistoryStore, SqliteHistoryStore>();
-        // etc.
+        // Audio (interfaces only — implementations are in VoiceInput.App)
+        services.AddSingleton<IVoiceActivityDetector>(_ => new AmplitudeVad());
+
+        // History
+        services.AddSingleton<IHistoryStore>(sp =>
+        {
+            var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            var dbDir = Path.Combine(appData, "VoiceInput");
+            Directory.CreateDirectory(dbDir);
+            return new SqliteHistoryStore(Path.Combine(dbDir, "history.db"));
+        });
+
+        // STT provider registry
+        services.AddSingleton<SttProviderRegistry>();
+
+        // STT providers
+        services.AddSingleton<OllamaSttProvider>();
+        services.AddSingleton<LmStudioSttProvider>();
 
         return services;
     }

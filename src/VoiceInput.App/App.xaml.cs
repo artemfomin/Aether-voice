@@ -1,19 +1,46 @@
 using System.IO;
+using System.Net.Http;
+using System.Runtime.Versioning;
 using System.Windows;
+using System.Windows.Input;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog;
+using VoiceInput.App.Audio;
+using VoiceInput.App.Focus;
+using VoiceInput.App.Hotkey;
+using VoiceInput.App.Injection;
 using VoiceInput.App.Native;
+using VoiceInput.App.Overlay;
+using VoiceInput.App.Overlay.Animations;
+using VoiceInput.App.Pipeline;
+using VoiceInput.App.Settings;
 using VoiceInput.App.Startup;
+using VoiceInput.App.Tray;
 using VoiceInput.Core;
+using VoiceInput.Core.Audio;
+using VoiceInput.Core.Config;
+using VoiceInput.Core.Focus;
+using VoiceInput.Core.History;
+using VoiceInput.Core.Injection;
+using VoiceInput.Core.Llm;
 using VoiceInput.Core.Logging;
+using VoiceInput.Core.Stt;
+using VoiceInput.Core.Stt.Providers;
 
 namespace VoiceInput.App;
 
+[SupportedOSPlatform("windows6.0.6000")]
 public partial class App : Application
 {
     private IServiceProvider? _serviceProvider;
     private SingleInstanceGuard? _guard;
+    private GlobalHotkeyService? _hotkey;
+    private TrayIconService? _tray;
+    private VoiceInputPipeline? _pipeline;
+    private OverlayStateManager? _overlayState;
+    private IslandWindow? _island;
+    private IFocusDetector? _focusDetector;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -34,6 +61,9 @@ public partial class App : Application
 
         // Reduce process priority and power consumption on Windows 11.
         SetEfficiencyMode();
+
+        // Bootstrap application services
+        Bootstrap();
     }
 
     private static void ConfigureServices(IServiceCollection services)
@@ -46,16 +76,293 @@ public partial class App : Application
         services.AddSingleton(serilogLogger);
         services.AddLogging(builder => builder.AddSerilog(serilogLogger, dispose: false));
 
-        // Core services
+        // Core services (Config, VAD, History, SttProviderRegistry, stubs)
         services.AddVoiceInputCore();
+
+        // HttpClient (shared)
+        services.AddSingleton<HttpClient>();
+
+        // Audio (App-level implementations)
+        services.AddSingleton<IAudioCapture, WasapiAudioCapture>();
+        services.AddSingleton<IAudioResampler, NAudioResampler>();
+        services.AddSingleton<IRecordingSession, RecordingSession>();
+        services.AddSingleton<IAudioDeviceEnumerator, WasapiDeviceEnumerator>();
+
+        // Injection
+        services.AddSingleton<IClipboardManager, Win32ClipboardManager>();
+        services.AddSingleton<ITextInjector, SendInputTextInjector>();
+        services.AddSingleton<IInjectionOrchestrator, SmartInjectionOrchestrator>();
+
+        // Focus
+        services.AddSingleton<IFocusDetector, UiaFocusDetector>();
+
+        // Hotkey
+        services.AddSingleton<GlobalHotkeyService>();
+
+        // Overlay
+        services.AddSingleton<IslandWindow>();
+        services.AddSingleton<OverlayStateManager>();
+
+        // Tray
+        services.AddSingleton<TrayIconService>();
     }
+
+    #pragma warning disable VSTHRD001 // Avoid legacy thread switching APIs — Dispatcher.BeginInvoke is the standard WPF pattern for marshalling to the UI thread
+    #pragma warning disable VSTHRD110 // Observe the awaitable result — fire-and-forget is intentional for UI event handlers
+    private void Bootstrap()
+    {
+        var sp = _serviceProvider!;
+        var logger = sp.GetRequiredService<ILogger<App>>();
+        var config = sp.GetRequiredService<AppConfig>();
+        var configStore = sp.GetRequiredService<IConfigStore>();
+        var registry = sp.GetRequiredService<SttProviderRegistry>();
+
+        // ── Register STT providers ───────────────────────────────────────────
+        var httpClient = sp.GetRequiredService<HttpClient>();
+
+        registry.Register(new OllamaSttProvider());
+        registry.Register(new LmStudioSttProvider());
+
+        var sttUrl = string.IsNullOrWhiteSpace(config.SttConfig.Url)
+            ? GetDefaultSttUrl(config.SttProvider)
+            : config.SttConfig.Url;
+
+        // Register the 3 functional providers
+        registry.Register(new OpenAiSttProvider(httpClient,
+            config.SttProvider == SttProviderType.OpenAI && !string.IsNullOrWhiteSpace(config.SttConfig.Url)
+                ? config.SttConfig.Url
+                : "https://api.openai.com",
+            config.SttConfig.ApiKey,
+            string.IsNullOrWhiteSpace(config.SttConfig.Model) ? "whisper-1" : config.SttConfig.Model));
+
+        registry.Register(new FasterWhisperSttProvider(httpClient,
+            config.SttProvider == SttProviderType.FasterWhisper && !string.IsNullOrWhiteSpace(config.SttConfig.Url)
+                ? config.SttConfig.Url
+                : "http://localhost:8000",
+            string.IsNullOrWhiteSpace(config.SttConfig.Model) ? "Systran/faster-distil-whisper-large-v3" : config.SttConfig.Model));
+
+        registry.Register(new GoogleSttProvider(httpClient, config.SttConfig.ApiKey));
+
+        // Resolve active provider
+        ISttProvider activeStt = registry.Resolve(config.SttProvider);
+
+        // ── Optional LLM post-processing ─────────────────────────────────────
+        ILlmProcessor? llmProcessor = null;
+        if (config.LlmPostProcessing.Enabled &&
+            !string.IsNullOrWhiteSpace(config.LlmPostProcessing.Url))
+        {
+            llmProcessor = new OpenAiCompatLlmProcessor(
+                httpClient,
+                config.LlmPostProcessing.Url,
+                config.LlmPostProcessing.ApiKey,
+                config.LlmPostProcessing.Model);
+        }
+
+        // ── Pipeline ─────────────────────────────────────────────────────────
+        var recording = sp.GetRequiredService<IRecordingSession>();
+        var injector = sp.GetRequiredService<IInjectionOrchestrator>();
+        var history = sp.GetRequiredService<IHistoryStore>();
+
+        _pipeline = new VoiceInputPipeline(recording, activeStt, injector, history, config, llmProcessor);
+
+        // ── Overlay + animation ──────────────────────────────────────────────
+        _island = sp.GetRequiredService<IslandWindow>();
+        _overlayState = sp.GetRequiredService<OverlayStateManager>();
+
+        _pipeline.StateChanged += (_, state) =>
+        {
+            _island.Dispatcher.BeginInvoke(() => _overlayState.OnPipelineStateChanged(state));
+        };
+
+        _pipeline.AmplitudeChanged += (_, amp) =>
+        {
+            _island.Dispatcher.BeginInvoke(() => _overlayState.UpdateAmplitude(amp));
+        };
+
+        _pipeline.ErrorOccurred += (_, msg) =>
+        {
+            _island.Dispatcher.BeginInvoke(() => _overlayState.ShowError(msg));
+        };
+
+        // ── Global hotkey ────────────────────────────────────────────────────
+        _hotkey = sp.GetRequiredService<GlobalHotkeyService>();
+
+        var modifiers = ParseModifiers(config.Hotkey.Modifiers);
+        var key = ParseKey(config.Hotkey.Key);
+
+        if (!_hotkey.Register(modifiers, key))
+        {
+            logger.LogWarning("Failed to register hotkey {Modifiers}+{Key} — may be taken by another app",
+                config.Hotkey.Modifiers, config.Hotkey.Key);
+        }
+
+        bool isRecording = false;
+        _hotkey.HotkeyPressed += (_, _) =>
+        {
+            _island.Dispatcher.BeginInvoke(async () =>
+            {
+                if (!isRecording)
+                {
+                    isRecording = true;
+                    var anim = CreateAnimation(config.AnimationStyle);
+                    _overlayState.ShowRecording(anim);
+                    await _pipeline.StartRecordingAsync(
+                        string.IsNullOrWhiteSpace(config.AudioDeviceId) ? null : config.AudioDeviceId);
+                }
+                else
+                {
+                    isRecording = false;
+                    var text = await _pipeline.StopAndProcessAsync();
+                    if (!string.IsNullOrWhiteSpace(text))
+                    {
+                        _overlayState.ShowSuccess(text);
+                    }
+                    else
+                    {
+                        _overlayState.Hide();
+                    }
+                }
+            });
+        };
+
+        // ── Focus detection ──────────────────────────────────────────────────
+        _focusDetector = sp.GetRequiredService<IFocusDetector>();
+
+        if (config.ActivationMode is ActivationMode.AutoDetect or ActivationMode.Both)
+        {
+            _focusDetector.TextFieldFocused += (_, args) =>
+            {
+                if (EdgeCaseHelper.IsFullScreenAppRunning()) return;
+
+                _island.Dispatcher.BeginInvoke(() =>
+                {
+                    var pos = OverlayPositioner.Calculate(
+                        args.CaretBounds, _island.Width, _island.Height);
+                    _island.Left = pos.X;
+                    _island.Top = pos.Y;
+                });
+            };
+
+            _focusDetector.TextFieldLostFocus += (_, _) =>
+            {
+                if (!isRecording)
+                {
+                    _island.Dispatcher.BeginInvoke(() => _overlayState.Hide());
+                }
+            };
+
+            _focusDetector.StartMonitoring();
+        }
+
+        // ── Tray icon ────────────────────────────────────────────────────────
+        _tray = sp.GetRequiredService<TrayIconService>();
+        _tray.Initialize();
+
+        _tray.SettingsRequested += (_, _) =>
+        {
+            var currentConfig = configStore.Load();
+            var settingsWindow = new SettingsWindow(currentConfig, updatedConfig =>
+            {
+                configStore.Save(updatedConfig);
+            }, history);
+            settingsWindow.ShowDialog();
+        };
+
+        _tray.ExitRequested += (_, _) => Shutdown();
+
+        _tray.PauseToggled += (_, paused) =>
+        {
+            if (paused)
+            {
+                _focusDetector?.StopMonitoring();
+                _hotkey?.Unregister();
+            }
+            else
+            {
+                if (config.ActivationMode is ActivationMode.AutoDetect or ActivationMode.Both)
+                {
+                    _focusDetector?.StartMonitoring();
+                }
+                _hotkey?.Register(modifiers, key);
+            }
+        };
+
+        _pipeline.StateChanged += (_, state) =>
+        {
+            _tray.SetRecording(state == PipelineState.Recording);
+        };
+
+        logger.LogInformation("Voice Input service started (STT: {Provider}, Hotkey: {Hotkey})",
+            config.SttProvider, $"{config.Hotkey.Modifiers}+{config.Hotkey.Key}");
+    }
+    #pragma warning restore VSTHRD110
+    #pragma warning restore VSTHRD001
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _focusDetector?.StopMonitoring();
+        _hotkey?.Dispose();
+        _tray?.Dispose();
+        _pipeline?.Dispose();
+        _island?.Close();
         (_serviceProvider as IDisposable)?.Dispose();
         _guard?.Dispose();
         base.OnExit(e);
     }
+
+    private static string GetDefaultSttUrl(SttProviderType provider) => provider switch
+    {
+        SttProviderType.OpenAI => "https://api.openai.com",
+        SttProviderType.FasterWhisper => "http://localhost:8000",
+        SttProviderType.Google => "https://speech.googleapis.com",
+        SttProviderType.Ollama => "http://localhost:11434",
+        SttProviderType.LMStudio => "http://localhost:1234",
+        _ => ""
+    };
+
+    private static ModifierKeys ParseModifiers(string? modifiersStr)
+    {
+        if (string.IsNullOrWhiteSpace(modifiersStr))
+            return ModifierKeys.Control | ModifierKeys.Shift;
+
+        var result = ModifierKeys.None;
+        var parts = modifiersStr.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        foreach (var part in parts)
+        {
+            if (part.Equals("Ctrl", StringComparison.OrdinalIgnoreCase) ||
+                part.Equals("Control", StringComparison.OrdinalIgnoreCase))
+                result |= ModifierKeys.Control;
+            else if (part.Equals("Shift", StringComparison.OrdinalIgnoreCase))
+                result |= ModifierKeys.Shift;
+            else if (part.Equals("Alt", StringComparison.OrdinalIgnoreCase))
+                result |= ModifierKeys.Alt;
+            else if (part.Equals("Win", StringComparison.OrdinalIgnoreCase) ||
+                     part.Equals("Windows", StringComparison.OrdinalIgnoreCase))
+                result |= ModifierKeys.Windows;
+        }
+
+        return result == ModifierKeys.None ? ModifierKeys.Control | ModifierKeys.Shift : result;
+    }
+
+    private static Key ParseKey(string? keyStr)
+    {
+        if (string.IsNullOrWhiteSpace(keyStr))
+            return Key.Space;
+
+        if (Enum.TryParse<Key>(keyStr, ignoreCase: true, out var key))
+            return key;
+
+        return Key.Space;
+    }
+
+    private static IRecordingAnimation CreateAnimation(AnimationStyle style) => style switch
+    {
+        AnimationStyle.GradientOrb => new GradientOrbAnimation(),
+        AnimationStyle.PulsingRings => new PulsingRingsAnimation(),
+        AnimationStyle.ParticleCloud => new ParticleCloudAnimation(),
+        AnimationStyle.WaveformBars => new WaveformBarsAnimation(),
+        _ => new GradientOrbAnimation()
+    };
 
     /// <summary>
     /// Enables Windows 11 Efficiency Mode for this process via SetProcessInformation.
