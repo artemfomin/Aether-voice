@@ -44,6 +44,7 @@ public sealed class WasapiAudioCapture : IAudioCapture, IDisposable
         try
         {
             InitialiseCapture(deviceId);
+            _dataCount = 0;
             _capture!.DataAvailable += OnDataAvailable;
             _capture.RecordingStopped += OnRecordingStopped;
             _capture.StartRecording();
@@ -75,6 +76,9 @@ public sealed class WasapiAudioCapture : IAudioCapture, IDisposable
 
     private void InitialiseCapture(string? deviceId)
     {
+        // Dispose previous capture to avoid resource leaks
+        DisposeCapture();
+
         if (!string.IsNullOrEmpty(deviceId))
         {
             using var enumerator = new MMDeviceEnumerator();
@@ -87,8 +91,14 @@ public sealed class WasapiAudioCapture : IAudioCapture, IDisposable
         }
     }
 
+    private int _dataCount;
+
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
+        var count = System.Threading.Interlocked.Increment(ref _dataCount);
+        if (count <= 3)
+            _logger.LogInformation("WASAPI DataAvailable #{Count}: {Bytes} bytes", count, e.BytesRecorded);
+
         if (e.BytesRecorded == 0)
             return;
 

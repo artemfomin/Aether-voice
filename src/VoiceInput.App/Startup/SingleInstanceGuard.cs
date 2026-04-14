@@ -7,7 +7,7 @@ namespace VoiceInput.App.Startup;
 /// </summary>
 public sealed class SingleInstanceGuard : IDisposable
 {
-    private const string DefaultMutexName = @"Global\VoiceInputService";
+    private const string DefaultMutexName = @"Global\AetherVoiceService";
 
     private readonly Mutex _mutex;
     private readonly bool _isOwner;

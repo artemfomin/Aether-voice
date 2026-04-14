@@ -4,6 +4,9 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Threading;
 using System.Threading.Tasks;
+#pragma warning disable VSTHRD110 // Observe the awaitable result — fire-and-forget is intentional for auto-stop
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using VoiceInput.Core.Audio;
 using VoiceInput.Core.Config;
 using VoiceInput.Core.History;
@@ -31,6 +34,8 @@ public sealed class VoiceInputPipeline : IDisposable
     private readonly IHistoryStore _history;
     private readonly ILlmProcessor? _llmProcessor;
     private readonly AppConfig _config;
+    private readonly ILogger _logger;
+    private readonly SynchronizationContext? _syncContext;
 
     private bool _disposed;
 
@@ -40,7 +45,8 @@ public sealed class VoiceInputPipeline : IDisposable
         IInjectionOrchestrator injector,
         IHistoryStore history,
         AppConfig config,
-        ILlmProcessor? llmProcessor = null)
+        ILlmProcessor? llmProcessor = null,
+        ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(recording);
         ArgumentNullException.ThrowIfNull(sttProvider);
@@ -54,6 +60,8 @@ public sealed class VoiceInputPipeline : IDisposable
         _history = history;
         _config = config;
         _llmProcessor = llmProcessor;
+        _logger = logger ?? NullLogger.Instance;
+        _syncContext = SynchronizationContext.Current;
     }
 
     /// <summary>Current pipeline state.</summary>
@@ -78,7 +86,7 @@ public sealed class VoiceInputPipeline : IDisposable
             SetState(PipelineState.Recording);
             _recording.AmplitudeChanged += OnAmplitude;
             _recording.AutoStopped += OnAutoStopped;
-            await _recording.StartAsync(deviceId).ConfigureAwait(false);
+            await _recording.StartAsync(deviceId);
         }
         catch (Exception ex)
         {
@@ -99,27 +107,31 @@ public sealed class VoiceInputPipeline : IDisposable
             _recording.AutoStopped -= OnAutoStopped;
 
             var sw = Stopwatch.StartNew();
-            var audioData = await _recording.StopAsync().ConfigureAwait(false);
+            var audioData = await _recording.StopAsync();
+            _logger.LogInformation("Audio captured: {Bytes} bytes", audioData.Length);
 
             if (audioData.Length == 0)
             {
+                _logger.LogWarning("Empty audio — skipping STT");
                 SetState(PipelineState.Idle);
                 return "";
             }
 
             // STT
-            var sttResult = await _sttProvider.TranscribeAsync(audioData, _config.Language, ct).ConfigureAwait(false);
+            _logger.LogInformation("Sending {Bytes} bytes to {Provider}...", audioData.Length, _sttProvider.Name);
+            var sttResult = await _sttProvider.TranscribeAsync(audioData, _config.Language, ct);
+            _logger.LogInformation("STT result: \"{Text}\"", sttResult.Text);
             var text = sttResult.Text;
 
             // Optional LLM post-processing
             if (_config.LlmPostProcessing.Enabled && _llmProcessor != null && !string.IsNullOrWhiteSpace(text))
             {
-                text = await _llmProcessor.ProcessAsync(text, _config.LlmPostProcessing.Mode, ct).ConfigureAwait(false);
+                text = await _llmProcessor.ProcessAsync(text, _config.LlmPostProcessing.Mode, ct);
             }
 
-            // Inject text
+            // Inject text (clipboard requires STA thread)
             SetState(PipelineState.Injecting);
-            await _injector.InjectAsync(text).ConfigureAwait(false);
+            await _injector.InjectAsync(text);
 
             sw.Stop();
 
@@ -149,20 +161,21 @@ public sealed class VoiceInputPipeline : IDisposable
                 Language = _config.Language,
                 LatencyMs = (int)sw.ElapsedMilliseconds,
                 CreatedAt = DateTime.UtcNow
-            }).ConfigureAwait(false);
+            });
 
             SetState(PipelineState.Idle);
             return text;
         }
         catch (SttException ex)
         {
-            ErrorOccurred?.Invoke(this, $"Transcription failed: {ex.Message}");
+            ErrorOccurred?.Invoke(this, $"STT error ({ex.Kind}): {ex.Message}");
             SetState(PipelineState.Idle);
             return "";
         }
         catch (Exception ex)
         {
-            ErrorOccurred?.Invoke(this, $"Pipeline error: {ex.Message}");
+            var inner = ex.InnerException != null ? $" → {ex.InnerException.GetType().Name}: {ex.InnerException.Message}" : "";
+            ErrorOccurred?.Invoke(this, $"{ex.GetType().Name}: {ex.Message}{inner}");
             SetState(PipelineState.Idle);
             return "";
         }
@@ -178,13 +191,23 @@ public sealed class VoiceInputPipeline : IDisposable
 
     private void OnAutoStopped(object? sender, EventArgs e)
     {
-        // Fire-and-forget with error handling to avoid async void
-        _ = Task.Run(async () =>
+        // Must dispatch to captured SynchronizationContext (WPF Dispatcher)
+        // to avoid cross-thread COM access when stopping WASAPI capture.
+        if (_syncContext != null)
         {
-            try { await StopAndProcessAsync().ConfigureAwait(false); }
-            catch { /* logged inside StopAndProcessAsync */ }
-        });
+            #pragma warning disable VSTHRD001 // SynchronizationContext.Post is the correct way to dispatch to UI from non-WPF code
+            _syncContext.Post(_ => ProcessAutoStop(), null);
+            #pragma warning restore VSTHRD001
+        }
     }
+
+    #pragma warning disable VSTHRD100 // async void is intentional — top-level fire-and-forget dispatched from SyncContext
+    private async void ProcessAutoStop()
+    {
+        try { await StopAndProcessAsync(); }
+        catch { /* logged inside StopAndProcessAsync */ }
+    }
+    #pragma warning restore VSTHRD100
 
     public void Dispose()
     {

@@ -41,6 +41,9 @@ public partial class App : Application
     private OverlayStateManager? _overlayState;
     private IslandWindow? _island;
     private IFocusDetector? _focusDetector;
+    private SettingsWindow? _settingsWindow;
+    private IConfigStore? _configStore;
+    private IHistoryStore? _historyStore;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -54,16 +57,28 @@ public partial class App : Application
             return;
         }
 
-        // DI Container
-        var services = new ServiceCollection();
-        ConfigureServices(services);
-        _serviceProvider = services.BuildServiceProvider();
+        try
+        {
+            // DI Container
+            var services = new ServiceCollection();
+            ConfigureServices(services);
+            _serviceProvider = services.BuildServiceProvider();
 
-        // Reduce process priority and power consumption on Windows 11.
-        SetEfficiencyMode();
+            // Efficiency Mode disabled — can interfere with network access in some configurations.
+            // SetEfficiencyMode();
 
-        // Bootstrap application services
-        Bootstrap();
+            // Bootstrap application services
+            Bootstrap();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                $"Aether Voice failed to start:\n\n{ex.Message}\n\n{ex.StackTrace}",
+                "Aether Voice — Startup Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown();
+        }
     }
 
     private static void ConfigureServices(IServiceCollection services)
@@ -79,8 +94,12 @@ public partial class App : Application
         // Core services (Config, VAD, History, SttProviderRegistry, stubs)
         services.AddVoiceInputCore();
 
-        // HttpClient (shared)
-        services.AddSingleton<HttpClient>();
+        // HttpClient (shared, 60s timeout, no proxy for local STT servers)
+        services.AddSingleton(_ => new HttpClient(new HttpClientHandler
+        {
+            UseProxy = false,
+            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator,
+        }) { Timeout = TimeSpan.FromSeconds(60) });
 
         // Audio (App-level implementations)
         services.AddSingleton<IAudioCapture, WasapiAudioCapture>();
@@ -115,6 +134,7 @@ public partial class App : Application
         var logger = sp.GetRequiredService<ILogger<App>>();
         var config = sp.GetRequiredService<AppConfig>();
         var configStore = sp.GetRequiredService<IConfigStore>();
+        _configStore = configStore;
         var registry = sp.GetRequiredService<SttProviderRegistry>();
 
         // ── Register STT providers ───────────────────────────────────────────
@@ -143,6 +163,11 @@ public partial class App : Application
 
         registry.Register(new GoogleSttProvider(httpClient, config.SttConfig.ApiKey));
 
+        registry.Register(new ParakeetSttProvider(httpClient,
+            config.SttProvider == SttProviderType.Parakeet && !string.IsNullOrWhiteSpace(config.SttConfig.Url)
+                ? config.SttConfig.Url
+                : "http://localhost:8097"));
+
         // Resolve active provider
         ISttProvider activeStt = registry.Resolve(config.SttProvider);
 
@@ -162,8 +187,10 @@ public partial class App : Application
         var recording = sp.GetRequiredService<IRecordingSession>();
         var injector = sp.GetRequiredService<IInjectionOrchestrator>();
         var history = sp.GetRequiredService<IHistoryStore>();
+        _historyStore = history;
 
-        _pipeline = new VoiceInputPipeline(recording, activeStt, injector, history, config, llmProcessor);
+        _pipeline = new VoiceInputPipeline(recording, activeStt, injector, history, config, llmProcessor,
+            sp.GetRequiredService<ILoggerFactory>().CreateLogger<VoiceInputPipeline>());
 
         // ── Overlay + animation ──────────────────────────────────────────────
         _island = sp.GetRequiredService<IslandWindow>();
@@ -179,48 +206,89 @@ public partial class App : Application
             _island.Dispatcher.BeginInvoke(() => _overlayState.UpdateAmplitude(amp));
         };
 
-        _pipeline.ErrorOccurred += (_, msg) =>
-        {
-            _island.Dispatcher.BeginInvoke(() => _overlayState.ShowError(msg));
-        };
-
         // ── Global hotkey ────────────────────────────────────────────────────
         _hotkey = sp.GetRequiredService<GlobalHotkeyService>();
 
         var modifiers = ParseModifiers(config.Hotkey.Modifiers);
         var key = ParseKey(config.Hotkey.Key);
 
+        logger.LogInformation("Registering hotkey: {Modifiers}+{Key} (parsed: {ParsedMod}+{ParsedKey})",
+            config.Hotkey.Modifiers, config.Hotkey.Key, modifiers, key);
+
         if (!_hotkey.Register(modifiers, key))
         {
             logger.LogWarning("Failed to register hotkey {Modifiers}+{Key} — may be taken by another app",
-                config.Hotkey.Modifiers, config.Hotkey.Key);
+                modifiers, key);
+        }
+        else
+        {
+            logger.LogInformation("Hotkey registered successfully");
         }
 
         bool isRecording = false;
+        bool isProcessing = false;
+        DateTime lastHotkeyTime = DateTime.MinValue;
+
+        _pipeline.ErrorOccurred += (_, msg) =>
+        {
+            _island.Dispatcher.BeginInvoke(() =>
+            {
+                isRecording = false;
+                isProcessing = false;
+                _overlayState.ShowError(msg);
+            });
+            logger.LogWarning("Pipeline error: {Error}", msg);
+        };
         _hotkey.HotkeyPressed += (_, _) =>
         {
             _island.Dispatcher.BeginInvoke(async () =>
             {
-                if (!isRecording)
+                // Debounce: ignore hotkey repeat within 500ms
+                var now = DateTime.UtcNow;
+                if ((now - lastHotkeyTime).TotalMilliseconds < 500) return;
+                lastHotkeyTime = now;
+
+                // Ignore while STT is processing
+                if (isProcessing) return;
+
+                try
                 {
-                    isRecording = true;
-                    var anim = CreateAnimation(config.AnimationStyle);
-                    _overlayState.ShowRecording(anim);
-                    await _pipeline.StartRecordingAsync(
-                        string.IsNullOrWhiteSpace(config.AudioDeviceId) ? null : config.AudioDeviceId);
-                }
-                else
-                {
-                    isRecording = false;
-                    var text = await _pipeline.StopAndProcessAsync();
-                    if (!string.IsNullOrWhiteSpace(text))
+                    logger.LogInformation("Hotkey pressed: isRecording={IsRec}, isProcessing={IsProc}, pipelineState={State}",
+                        isRecording, isProcessing, _pipeline.State);
+
+                    if (!isRecording)
                     {
-                        _overlayState.ShowSuccess(text);
+                        isRecording = true;
+                        logger.LogInformation("→ START recording");
+                        var anim = CreateAnimation(config.AnimationStyle);
+                        _overlayState.ShowRecording(anim);
+                        await _pipeline.StartRecordingAsync(
+                            string.IsNullOrWhiteSpace(config.AudioDeviceId) ? null : config.AudioDeviceId);
                     }
                     else
                     {
-                        _overlayState.Hide();
+                        isRecording = false;
+                        isProcessing = true;
+                        logger.LogInformation("→ STOP recording, starting processing");
+                        var text = await _pipeline.StopAndProcessAsync();
+                        isProcessing = false;
+                        logger.LogInformation("→ Processing complete: \"{Text}\"", text);
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            _overlayState.ShowSuccess(text);
+                        }
+                        else
+                        {
+                            _overlayState.Hide();
+                        }
                     }
+                }
+                catch (Exception ex)
+                {
+                    isRecording = false;
+                    isProcessing = false;
+                    logger.LogError(ex, "Hotkey handler error");
+                    _overlayState.ShowError(ex.Message);
                 }
             });
         };
@@ -258,15 +326,7 @@ public partial class App : Application
         _tray = sp.GetRequiredService<TrayIconService>();
         _tray.Initialize();
 
-        _tray.SettingsRequested += (_, _) =>
-        {
-            var currentConfig = configStore.Load();
-            var settingsWindow = new SettingsWindow(currentConfig, updatedConfig =>
-            {
-                configStore.Save(updatedConfig);
-            }, history);
-            settingsWindow.ShowDialog();
-        };
+        _tray.SettingsRequested += (_, _) => ShowSettings();
 
         _tray.ExitRequested += (_, _) => Shutdown();
 
@@ -292,10 +352,30 @@ public partial class App : Application
             _tray.SetRecording(state == PipelineState.Recording);
         };
 
-        logger.LogInformation("Voice Input service started (STT: {Provider}, Hotkey: {Hotkey})",
+        logger.LogInformation("Aether Voice started (STT: {Provider}, Hotkey: {Hotkey})",
             config.SttProvider, $"{config.Hotkey.Modifiers}+{config.Hotkey.Key}");
     }
     #pragma warning restore VSTHRD110
+    #pragma warning restore VSTHRD001
+
+    #pragma warning disable VSTHRD001 // Avoid legacy thread switching APIs — Dispatcher.BeginInvoke is the standard WPF pattern for marshalling to the UI thread
+    private void ShowSettings()
+    {
+        if (_settingsWindow is { IsLoaded: true })
+        {
+            _settingsWindow.Activate();
+            _settingsWindow.Focus();
+            return;
+        }
+
+        var currentConfig = _configStore!.Load();
+        _settingsWindow = new SettingsWindow(currentConfig, updatedConfig =>
+        {
+            _configStore.Save(updatedConfig);
+        }, _historyStore!);
+        _settingsWindow.Closed += (_, _) => _settingsWindow = null;
+        _settingsWindow.Show();
+    }
     #pragma warning restore VSTHRD001
 
     protected override void OnExit(ExitEventArgs e)
@@ -317,6 +397,7 @@ public partial class App : Application
         SttProviderType.Google => "https://speech.googleapis.com",
         SttProviderType.Ollama => "http://localhost:11434",
         SttProviderType.LMStudio => "http://localhost:1234",
+        SttProviderType.Parakeet => "http://localhost:8097",
         _ => ""
     };
 

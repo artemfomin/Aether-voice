@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!--
+  WiX v5 installer for Aether Voice — Windows 11 system-wide voice input service.
+  Produces a per-user MSI with Start Menu shortcut, optional Run at Startup,
+  and Repair/Uninstall support when re-run on an existing installation.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package Name="Aether Voice"
+           Manufacturer="Aether"
+           Version="1.0.0.0"
+           UpgradeCode="9B47EC21-85FB-4BF8-8B1D-716B7FA0386E"
+           Scope="perUser"
+           InstallerVersion="500">
+
+    <!--
+      MajorUpgrade: automatically removes older versions during upgrade.
+      If the same or newer version is already installed, blocks with a message.
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Aether Voice is already installed."
+                  AllowSameVersionUpgrades="yes" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- ── Install directory ────────────────────────────────────────── -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="COMPANYDIR" Name="AetherVoice">
+        <Directory Id="INSTALLDIR" Name="App" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- ── Main application file ────────────────────────────────────── -->
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLDIR">
+      <Component Id="MainExecutable" Guid="89DEBE00-33A9-41B0-9524-3BA4CAD4DCE0">
+        <File Id="VoiceInputExe"
+              Source="$(SourceDir)\VoiceInput.App.exe"
+              KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Start Menu shortcut ──────────────────────────────────────── -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ProgramMenuVoiceInput" Name="Aether Voice" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="ShortcutComponents" Directory="ProgramMenuVoiceInput">
+      <Component Id="StartMenuShortcut" Guid="516731CB-6BCB-444E-9D58-FEFB9DD0BD31">
+        <Shortcut Id="VoiceInputStartMenu"
+                  Name="Aether Voice"
+                  Description="System-wide voice input service"
+                  Target="[INSTALLDIR]VoiceInput.App.exe"
+                  WorkingDirectory="INSTALLDIR" />
+        <RemoveFolder Id="RemoveProgramMenuDir" On="uninstall" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\AetherVoice"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Desktop shortcut (optional) ──────────────────────────────── -->
+    <StandardDirectory Id="DesktopFolder" />
+
+    <ComponentGroup Id="DesktopShortcutComponents" Directory="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="A3F1D8E2-7C4B-4E9A-B5D6-8F2A1C3E5D7B">
+        <Shortcut Id="VoiceInputDesktop"
+                  Name="Aether Voice"
+                  Description="System-wide voice input service"
+                  Target="[INSTALLDIR]VoiceInput.App.exe"
+                  WorkingDirectory="INSTALLDIR" />
+        <RegistryValue Root="HKCU"
+                       Key="Software\AetherVoice"
+                       Name="DesktopShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Run at Windows startup (registry) ────────────────────────── -->
+    <ComponentGroup Id="StartupComponents" Directory="INSTALLDIR">
+      <Component Id="RunAtStartup" Guid="7EEDA1B3-BF18-49DE-9820-B28ECDACC5B8">
+        <RegistryValue Root="HKCU"
+                       Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                       Name="AetherVoice"
+                       Type="string"
+                       Value="[INSTALLDIR]VoiceInput.App.exe"
+                       KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- ── Feature tree ─────────────────────────────────────────────── -->
+    <Feature Id="MainFeature" Title="Aether Voice Application" Level="1"
+             Description="Core application files and Start Menu shortcut."
+             AllowAbsent="no" Display="expand">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentGroupRef Id="ShortcutComponents" />
+    </Feature>
+
+    <Feature Id="DesktopShortcutFeature" Title="Desktop Shortcut" Level="1"
+             Description="Add a shortcut to the Desktop.">
+      <ComponentGroupRef Id="DesktopShortcutComponents" />
+    </Feature>
+
+    <Feature Id="AutoStart" Title="Run at Windows Startup" Level="1"
+             Description="Automatically start Aether Voice when Windows starts.">
+      <ComponentGroupRef Id="StartupComponents" />
+    </Feature>
+
+    <!--
+      WixUI_FeatureTree: Full installer UI with feature selection.
+      On re-run when already installed → shows Change / Repair / Remove dialog.
+    -->
+    <ui:WixUI Id="WixUI_FeatureTree" />
+
+    <!--
+      Suppress license dialog (no license file). WixUI_FeatureTree normally
+      shows a license step — override with empty variable to skip it.
+    -->
+    <WixVariable Id="WixUILicenseRtf" Value="installer\License.rtf" />
+
+  </Package>
+</Wix>

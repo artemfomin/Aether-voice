@@ -31,6 +31,12 @@ Thumbs.db
 ## Sisyphus
 .sisyphus/
 
+## Installer build outputs
+publish/
+installer/*.msi
+installer/*.wixpdb
+installer/*.cab
+
 ## Spike (temporary)
 spike/bin/
 spike/obj/

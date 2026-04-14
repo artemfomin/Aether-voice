@@ -70,7 +70,11 @@ public sealed class OverlayStateManager
                 ShowProcessing();
                 break;
             case PipelineState.Idle:
-                // Handled by ShowSuccess or ShowError externally
+                // If still visible with no success/error, hide the overlay
+                if (_island.IsVisible && _autoHideTimer == null)
+                {
+                    Hide();
+                }
                 break;
         }
     }

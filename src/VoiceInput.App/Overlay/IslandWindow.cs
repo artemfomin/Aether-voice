@@ -1,8 +1,11 @@
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -31,6 +34,11 @@ public sealed class IslandWindow : Window
     private const int WsExToolwindow = 0x00000080;
     private const int DwmwaWindowCornerPreference = 33;
     private const int DwmwcpRound = 2;
+
+    private const double BottomMargin = 60;
+    private static readonly string PositionFilePath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "VoiceInput", "overlay-position.json");
 
     private readonly Border _pill;
     private readonly TextBlock _statusText;
@@ -88,6 +96,8 @@ public sealed class IslandWindow : Window
 
         Content = _pill;
 
+        _pill.MouseLeftButtonDown += OnPillMouseLeftButtonDown;
+
         Loaded += OnLoaded;
     }
 
@@ -109,29 +119,30 @@ public sealed class IslandWindow : Window
     /// <summary>Gets the current animation.</summary>
     public IRecordingAnimation? CurrentAnimation => _currentAnimation;
 
-    /// <summary>Shows the island with a slide-in animation.</summary>
+    /// <summary>Shows the island with a fade-in + slide-in animation.</summary>
     public void ShowAnimated()
     {
         Opacity = 0;
         Show();
 
+        // Fade in the window
         var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200))
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
         };
+        BeginAnimation(OpacityProperty, fadeIn);
 
+        // Slide the pill content (RenderTransform on Window is forbidden in WPF)
         var transform = new TranslateTransform(0, -5);
-        RenderTransform = transform;
+        _pill.RenderTransform = transform;
         var slideIn = new DoubleAnimation(-5, 0, TimeSpan.FromMilliseconds(200))
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
         };
-
-        BeginAnimation(OpacityProperty, fadeIn);
         transform.BeginAnimation(TranslateTransform.YProperty, slideIn);
     }
 
-    /// <summary>Hides the island with a slide-out animation.</summary>
+    /// <summary>Hides the island with a fade-out + slide-out animation.</summary>
     public void HideAnimated()
     {
         var fadeOut = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(150))
@@ -139,15 +150,15 @@ public sealed class IslandWindow : Window
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
         };
         fadeOut.Completed += (_, _) => Hide();
+        BeginAnimation(OpacityProperty, fadeOut);
 
-        var transform = RenderTransform as TranslateTransform ?? new TranslateTransform(0, 0);
-        RenderTransform = transform;
+        // Slide the pill content down
+        var transform = _pill.RenderTransform as TranslateTransform ?? new TranslateTransform(0, 0);
+        _pill.RenderTransform = transform;
         var slideOut = new DoubleAnimation(0, 5, TimeSpan.FromMilliseconds(150))
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
         };
-
-        BeginAnimation(OpacityProperty, fadeOut);
         transform.BeginAnimation(TranslateTransform.YProperty, slideOut);
     }
 
@@ -162,5 +173,85 @@ public sealed class IslandWindow : Window
         // DWM rounded corners
         int pref = DwmwcpRound;
         DwmSetWindowAttribute(hwnd, DwmwaWindowCornerPreference, ref pref, sizeof(int));
+
+        // Restore saved position or use default bottom-center
+        ApplySavedOrDefaultPosition();
+
+        // Persist position when user drags or focus detector repositions
+        LocationChanged += OnLocationChanged;
     }
+
+    /// <summary>Handles mouse drag on the pill to move the window.</summary>
+    private void OnPillMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Left)
+        {
+            try { DragMove(); }
+            catch (InvalidOperationException) { /* mouse not captured */ }
+        }
+    }
+
+    /// <summary>Applies the last saved position, or falls back to default bottom-center.</summary>
+    private void ApplySavedOrDefaultPosition()
+    {
+        var saved = LoadPosition();
+        if (saved.HasValue)
+        {
+            Left = saved.Value.X;
+            Top = saved.Value.Y;
+        }
+        else
+        {
+            SetDefaultPosition();
+        }
+    }
+
+    /// <summary>Sets the window to bottom-center of primary screen.</summary>
+    private void SetDefaultPosition()
+    {
+        Left = (SystemParameters.WorkArea.Width - Width) / 2;
+        Top = SystemParameters.WorkArea.Bottom - Height - BottomMargin;
+    }
+
+    private void OnLocationChanged(object? sender, EventArgs e)
+    {
+        if (Left > 0 || Top > 0)
+            SavePosition();
+    }
+
+    /// <summary>Reads the saved overlay position from disk. Returns null if unavailable.</summary>
+    private static Point? LoadPosition()
+    {
+        try
+        {
+            if (!File.Exists(PositionFilePath)) return null;
+            var json = File.ReadAllText(PositionFilePath);
+            var data = JsonSerializer.Deserialize<OverlayPositionData>(json);
+            return data is null ? null : new Point(data.X, data.Y);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Persists the current overlay position to disk.</summary>
+    private void SavePosition()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(PositionFilePath);
+            if (dir is not null) Directory.CreateDirectory(dir);
+            var data = new OverlayPositionData(Left, Top);
+            var json = JsonSerializer.Serialize(data);
+            File.WriteAllText(PositionFilePath, json);
+        }
+        catch
+        {
+            // Non-critical — position will use default next launch
+        }
+    }
+
+    /// <summary>Serializable overlay position record.</summary>
+    private sealed record OverlayPositionData(double X, double Y);
 }

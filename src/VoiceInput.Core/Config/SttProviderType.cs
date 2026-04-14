@@ -7,4 +7,5 @@ public enum SttProviderType
     FasterWhisper,
     Ollama,
     LMStudio,
+    Parakeet,
 }

@@ -28,6 +28,7 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
     private Stopwatch? _stopwatch;
     private Timer? _maxDurationTimer;
     private volatile RecordingState _state;
+    private volatile bool _speechDetected;
     private bool _disposed;
 
     public RecordingSession(
@@ -68,6 +69,8 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
             _buffer = new MemoryStream();
             _captureFormat = null;
             _vad.Reset();
+            _speechDetected = false;
+            _dataCallbackCount = 0;
             _stopwatch = Stopwatch.StartNew();
             _state = RecordingState.Recording;
         }
@@ -149,9 +152,16 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
         }
     }
 
+    private int _dataCallbackCount;
+
     private void OnAudioData(object? sender, AudioDataEventArgs e)
     {
         if (_state != RecordingState.Recording) return;
+
+        var count = Interlocked.Increment(ref _dataCallbackCount);
+        if (count == 1)
+            _logger.LogInformation("First audio data callback: {Bytes} bytes, format: {Rate}Hz/{Bits}bit/{Ch}ch",
+                e.BytesRecorded, e.Format.SampleRate, e.Format.BitsPerSample, e.Format.Channels);
 
         lock (_lock)
         {
@@ -166,8 +176,12 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
             var vadResult = _vad.ProcessSamples(samples);
             AmplitudeChanged?.Invoke(this, vadResult.CurrentAmplitude);
 
-            // Check for VAD auto-stop
-            if (_vad is AmplitudeVad ampVad &&
+            if (vadResult.IsSpeech)
+                _speechDetected = true;
+
+            // Check for VAD auto-stop — only after speech was detected
+            if (_speechDetected &&
+                _vad is AmplitudeVad ampVad &&
                 vadResult.SilenceDurationMs >= ampVad.SilenceTimeoutMs &&
                 Duration > MinDuration)
             {
@@ -177,19 +191,21 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
         }
     }
 
-    private async Task HandleMaxDurationAsync()
+    private Task HandleMaxDurationAsync()
     {
-        if (_state != RecordingState.Recording) return;
+        if (_state != RecordingState.Recording) return Task.CompletedTask;
         _logger.LogWarning("Max recording duration reached (5 min) — auto-stopping");
-        await StopAsync().ConfigureAwait(false);
         AutoStopped?.Invoke(this, EventArgs.Empty);
+        return Task.CompletedTask;
     }
 
-    private async Task HandleAutoStopAsync()
+    private Task HandleAutoStopAsync()
     {
-        if (_state != RecordingState.Recording) return;
-        await StopAsync().ConfigureAwait(false);
+        if (_state != RecordingState.Recording) return Task.CompletedTask;
+        // Don't call StopAsync here — just signal AutoStopped.
+        // The Pipeline will call StopAndProcessAsync which calls StopAsync.
         AutoStopped?.Invoke(this, EventArgs.Empty);
+        return Task.CompletedTask;
     }
 
     private static short[] ConvertToInt16Samples(byte[] buffer, int bytesRecorded, WaveFormat format)
