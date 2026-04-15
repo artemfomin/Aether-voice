@@ -25,6 +25,8 @@ internal static class InjectionNativeMethods
 
     internal const ushort VkControl = 0x11;
     internal const ushort VkShift   = 0x10;
+    internal const ushort VkMenu    = 0x12; // Alt
+    internal const ushort VkLWin    = 0x5B; // Left Windows
     internal const ushort VkV       = 0x56;
 
     // ── Process / token access rights ────────────────────────────────────────
@@ -57,6 +59,9 @@ internal static class InjectionNativeMethods
 
     [DllImport("user32.dll")]
     internal static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    internal static extern short GetAsyncKeyState(int vKey);
 
     // ── kernel32.dll ──────────────────────────────────────────────────────────
 

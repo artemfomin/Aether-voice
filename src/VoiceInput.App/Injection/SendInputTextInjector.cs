@@ -184,6 +184,8 @@ public sealed class SendInputTextInjector : ITextInjector
 
     private static InjectionResult PerformCtrlV()
     {
+        // Release any held modifier keys first (user may still hold Ctrl/Alt from hotkey)
+        var release = ReleaseHeldModifiers();
         var inputs = new[]
         {
             MakeKeyDown(VkControl),
@@ -191,11 +193,13 @@ public sealed class SendInputTextInjector : ITextInjector
             MakeKeyUp(VkV),
             MakeKeyUp(VkControl),
         };
+        if (release.Length > 0) SendAll(release);
         return SendAll(inputs);
     }
 
     private static InjectionResult PerformCtrlShiftV()
     {
+        var release = ReleaseHeldModifiers();
         var inputs = new[]
         {
             MakeKeyDown(VkControl),
@@ -205,7 +209,22 @@ public sealed class SendInputTextInjector : ITextInjector
             MakeKeyUp(VkShift),
             MakeKeyUp(VkControl),
         };
+        if (release.Length > 0) SendAll(release);
         return SendAll(inputs);
+    }
+
+    /// <summary>
+    /// Releases Ctrl, Shift, Alt, Win if currently held — prevents ghost modifiers
+    /// from interfering with the paste keystroke.
+    /// </summary>
+    private static INPUT[] ReleaseHeldModifiers()
+    {
+        var list = new System.Collections.Generic.List<INPUT>(4);
+        if ((GetAsyncKeyState(VkControl) & 0x8000) != 0) list.Add(MakeKeyUp(VkControl));
+        if ((GetAsyncKeyState(VkShift) & 0x8000) != 0) list.Add(MakeKeyUp(VkShift));
+        if ((GetAsyncKeyState(VkMenu) & 0x8000) != 0) list.Add(MakeKeyUp(VkMenu));
+        if ((GetAsyncKeyState(VkLWin) & 0x8000) != 0) list.Add(MakeKeyUp(VkLWin));
+        return [.. list];
     }
 
     private static InjectionResult SendAll(INPUT[] inputs)
