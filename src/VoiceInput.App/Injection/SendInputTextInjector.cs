@@ -186,6 +186,12 @@ public sealed class SendInputTextInjector : ITextInjector
     {
         // Release any held modifier keys first (user may still hold Ctrl/Alt from hotkey)
         var release = ReleaseHeldModifiers();
+        if (release.Length > 0)
+        {
+            SendAll(release);
+            Thread.Sleep(100); // Wait for OS to process key releases
+        }
+
         var inputs = new[]
         {
             MakeKeyDown(VkControl),
@@ -193,13 +199,18 @@ public sealed class SendInputTextInjector : ITextInjector
             MakeKeyUp(VkV),
             MakeKeyUp(VkControl),
         };
-        if (release.Length > 0) SendAll(release);
         return SendAll(inputs);
     }
 
     private static InjectionResult PerformCtrlShiftV()
     {
         var release = ReleaseHeldModifiers();
+        if (release.Length > 0)
+        {
+            SendAll(release);
+            Thread.Sleep(100);
+        }
+
         var inputs = new[]
         {
             MakeKeyDown(VkControl),
@@ -209,7 +220,6 @@ public sealed class SendInputTextInjector : ITextInjector
             MakeKeyUp(VkShift),
             MakeKeyUp(VkControl),
         };
-        if (release.Length > 0) SendAll(release);
         return SendAll(inputs);
     }
 

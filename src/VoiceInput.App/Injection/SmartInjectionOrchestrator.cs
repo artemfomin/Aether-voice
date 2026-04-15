@@ -22,7 +22,7 @@ public sealed class SmartInjectionOrchestrator : IInjectionOrchestrator
     public SmartInjectionOrchestrator(
         IClipboardManager clipboard,
         ITextInjector injector,
-        int pasteDelayMs = 300)
+        int pasteDelayMs = 500)
     {
         ArgumentNullException.ThrowIfNull(clipboard);
         ArgumentNullException.ThrowIfNull(injector);
