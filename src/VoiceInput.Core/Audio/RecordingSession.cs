@@ -21,6 +21,7 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
     private readonly IAudioResampler _resampler;
     private readonly IVoiceActivityDetector _vad;
     private readonly ILogger _logger;
+    private readonly int _silenceTimeoutMs;
 
     private readonly object _lock = new();
     private MemoryStream? _buffer;
@@ -29,13 +30,15 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
     private Timer? _maxDurationTimer;
     private volatile RecordingState _state;
     private volatile bool _speechDetected;
+    private volatile bool _autoStopFired;
     private bool _disposed;
 
     public RecordingSession(
         IAudioCapture capture,
         IAudioResampler resampler,
         IVoiceActivityDetector vad,
-        ILogger? logger = null)
+        ILogger? logger = null,
+        int silenceTimeoutMs = 0)
     {
         ArgumentNullException.ThrowIfNull(capture);
         ArgumentNullException.ThrowIfNull(resampler);
@@ -45,6 +48,7 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
         _resampler = resampler;
         _vad = vad;
         _logger = logger ?? NullLogger.Instance;
+        _silenceTimeoutMs = silenceTimeoutMs;
     }
 
     public RecordingState State => _state;
@@ -70,6 +74,7 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
             _captureFormat = null;
             _vad.Reset();
             _speechDetected = false;
+            _autoStopFired = false;
             _dataCallbackCount = 0;
             _stopwatch = Stopwatch.StartNew();
             _state = RecordingState.Recording;
@@ -179,13 +184,23 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
             if (vadResult.IsSpeech)
                 _speechDetected = true;
 
-            // Check for VAD auto-stop — only after speech was detected
-            if (_speechDetected &&
+            // Log every 50 callbacks (~0.5 sec)
+            if (count % 50 == 0 && _vad is AmplitudeVad ampVadLog)
+            {
+                _logger.LogInformation("VAD[{Count}]: amp={Amp:F4}, speech={Speech}, speechDetected={SD}, silence={SilMs}ms/{TimeoutMs}ms, dur={Dur:F1}s",
+                    count, vadResult.CurrentAmplitude, vadResult.IsSpeech, _speechDetected,
+                    vadResult.SilenceDurationMs, ampVadLog.SilenceTimeoutMs, Duration.TotalSeconds);
+            }
+
+            // VAD auto-stop: only if timeout > 0 (0 = disabled / push-to-talk only)
+            if (_silenceTimeoutMs > 0 &&
+                _speechDetected &&
                 _vad is AmplitudeVad ampVad &&
-                vadResult.SilenceDurationMs >= ampVad.SilenceTimeoutMs &&
+                vadResult.SilenceDurationMs >= _silenceTimeoutMs &&
                 Duration > MinDuration)
             {
-                _logger.LogInformation("VAD silence timeout — auto-stopping");
+                _logger.LogInformation("VAD silence timeout ({SilenceMs}ms >= {TimeoutMs}ms) — auto-stopping",
+                    vadResult.SilenceDurationMs, _silenceTimeoutMs);
                 _ = HandleAutoStopAsync();
             }
         }
@@ -201,9 +216,9 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
 
     private Task HandleAutoStopAsync()
     {
-        if (_state != RecordingState.Recording) return Task.CompletedTask;
-        // Don't call StopAsync here — just signal AutoStopped.
-        // The Pipeline will call StopAndProcessAsync which calls StopAsync.
+        if (_autoStopFired || _state != RecordingState.Recording) return Task.CompletedTask;
+        _autoStopFired = true;
+        _logger.LogInformation("HandleAutoStopAsync firing (duration={Duration:F1}s)", Duration.TotalSeconds);
         AutoStopped?.Invoke(this, EventArgs.Empty);
         return Task.CompletedTask;
     }

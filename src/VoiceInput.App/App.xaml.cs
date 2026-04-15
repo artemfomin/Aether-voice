@@ -104,7 +104,16 @@ public partial class App : Application
         // Audio (App-level implementations)
         services.AddSingleton<IAudioCapture, WasapiAudioCapture>();
         services.AddSingleton<IAudioResampler, NAudioResampler>();
-        services.AddSingleton<IRecordingSession, RecordingSession>();
+        services.AddSingleton<IRecordingSession>(sp =>
+        {
+            var cfg = sp.GetRequiredService<AppConfig>();
+            return new RecordingSession(
+                sp.GetRequiredService<IAudioCapture>(),
+                sp.GetRequiredService<IAudioResampler>(),
+                sp.GetRequiredService<IVoiceActivityDetector>(),
+                sp.GetRequiredService<ILoggerFactory>().CreateLogger<RecordingSession>(),
+                silenceTimeoutMs: cfg.SilenceTimeoutMs);
+        });
         services.AddSingleton<IAudioDeviceEnumerator, WasapiDeviceEnumerator>();
 
         // Injection
@@ -136,6 +145,12 @@ public partial class App : Application
         var configStore = sp.GetRequiredService<IConfigStore>();
         _configStore = configStore;
         var registry = sp.GetRequiredService<SttProviderRegistry>();
+
+        // Log VAD config
+        var vad = sp.GetRequiredService<IVoiceActivityDetector>();
+        if (vad is AmplitudeVad ampVad)
+            logger.LogInformation("VAD config: silenceTimeout={Timeout}ms, speechThreshold={Threshold}",
+                ampVad.SilenceTimeoutMs, 0.02f);
 
         // ── Register STT providers ───────────────────────────────────────────
         var httpClient = sp.GetRequiredService<HttpClient>();
@@ -196,9 +211,22 @@ public partial class App : Application
         _island = sp.GetRequiredService<IslandWindow>();
         _overlayState = sp.GetRequiredService<OverlayStateManager>();
 
+        bool isRecording = false;
+        bool isProcessing = false;
+        DateTime lastHotkeyTime = DateTime.MinValue;
+
         _pipeline.StateChanged += (_, state) =>
         {
-            _island.Dispatcher.BeginInvoke(() => _overlayState.OnPipelineStateChanged(state));
+            _island.Dispatcher.BeginInvoke(() =>
+            {
+                _overlayState.OnPipelineStateChanged(state);
+                // Reset flags when pipeline returns to Idle (e.g. after auto-stop)
+                if (state == PipelineState.Idle)
+                {
+                    isRecording = false;
+                    isProcessing = false;
+                }
+            });
         };
 
         _pipeline.AmplitudeChanged += (_, amp) =>
@@ -224,10 +252,6 @@ public partial class App : Application
         {
             logger.LogInformation("Hotkey registered successfully");
         }
-
-        bool isRecording = false;
-        bool isProcessing = false;
-        DateTime lastHotkeyTime = DateTime.MinValue;
 
         _pipeline.ErrorOccurred += (_, msg) =>
         {

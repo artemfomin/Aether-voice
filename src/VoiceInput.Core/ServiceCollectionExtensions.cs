@@ -28,7 +28,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(sp => sp.GetRequiredService<IConfigStore>().Load());
 
         // Audio (interfaces only — implementations are in VoiceInput.App)
-        services.AddSingleton<IVoiceActivityDetector>(_ => new AmplitudeVad());
+        services.AddSingleton<IVoiceActivityDetector>(sp =>
+        {
+            var cfg = sp.GetRequiredService<AppConfig>();
+            var timeout = cfg.SilenceTimeoutMs > 0 ? cfg.SilenceTimeoutMs : 3000;
+            return new AmplitudeVad(silenceTimeoutMs: timeout);
+        });
 
         // History
         services.AddSingleton<IHistoryStore>(sp =>

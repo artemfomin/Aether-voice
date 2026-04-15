@@ -551,6 +551,43 @@ public sealed class SettingsWindow : Window
             card.Children.Add(combo);
         });
 
+        AddCard(panel, card =>
+        {
+            card.Children.Add(CreateFieldLabel("Silence Timeout (ms)"));
+            card.Children.Add(new TextBlock
+            {
+                Text = "How long to wait after speech stops before auto-ending recording",
+                Foreground = TextDimBrush, FontSize = 11,
+                Margin = new Thickness(0, 0, 0, 6),
+            });
+
+            var slider = new Slider
+            {
+                Minimum = 0,
+                Maximum = 10000,
+                Value = _config.SilenceTimeoutMs,
+                TickFrequency = 500,
+                IsSnapToTickEnabled = true,
+                Foreground = AccentBrush,
+            };
+            var valueLabel = new TextBlock
+            {
+                Text = _config.SilenceTimeoutMs == 0 ? "Disabled (push-to-talk only)" : $"{_config.SilenceTimeoutMs} ms",
+                Foreground = TextBrush,
+                FontSize = 13,
+                FontWeight = FontWeights.Medium,
+                Margin = new Thickness(0, 4, 0, 0),
+            };
+            slider.ValueChanged += (_, e) =>
+            {
+                _config.SilenceTimeoutMs = (int)e.NewValue;
+                valueLabel.Text = _config.SilenceTimeoutMs == 0 ? "Disabled (push-to-talk only)" : $"{_config.SilenceTimeoutMs} ms";
+                _onSave(_config);
+            };
+            card.Children.Add(slider);
+            card.Children.Add(valueLabel);
+        });
+
         return panel;
     }
 

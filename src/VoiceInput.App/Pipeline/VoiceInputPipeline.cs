@@ -191,6 +191,7 @@ public sealed class VoiceInputPipeline : IDisposable
 
     private void OnAutoStopped(object? sender, EventArgs e)
     {
+        _logger.LogInformation("OnAutoStopped fired, pipeline state: {State}", State);
         // Must dispatch to captured SynchronizationContext (WPF Dispatcher)
         // to avoid cross-thread COM access when stopping WASAPI capture.
         if (_syncContext != null)
@@ -204,8 +205,9 @@ public sealed class VoiceInputPipeline : IDisposable
     #pragma warning disable VSTHRD100 // async void is intentional — top-level fire-and-forget dispatched from SyncContext
     private async void ProcessAutoStop()
     {
+        _logger.LogInformation("ProcessAutoStop executing, pipeline state: {State}", State);
         try { await StopAndProcessAsync(); }
-        catch { /* logged inside StopAndProcessAsync */ }
+        catch (Exception ex) { _logger.LogError(ex, "ProcessAutoStop error"); }
     }
     #pragma warning restore VSTHRD100
 
