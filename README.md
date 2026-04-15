@@ -6,7 +6,7 @@ Aether Voice lives in the system tray, captures audio via WASAPI, transcribes sp
 
 ![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4?logo=dotnet)
 ![Windows 11](https://img.shields.io/badge/Windows-11-0078D4?logo=windows11)
-![License](https://img.shields.io/badge/License-MIT-green)
+![License](https://img.shields.io/badge/License-Apache%202.0-blue)
 
 ---
 
@@ -152,4 +152,4 @@ Rolling log files at `%AppData%\VoiceInput\logs\voiceinput-YYYYMMDD.log`
 
 ## License
 
-MIT
+Apache License 2.0 — see [LICENSE](LICENSE)
