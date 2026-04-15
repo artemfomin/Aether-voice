@@ -284,10 +284,11 @@ public partial class App : Application
                     {
                         isRecording = true;
                         logger.LogInformation("→ START recording");
-                        var anim = CreateAnimation(config.AnimationStyle);
+                        var liveConfig = _configStore.Load();
+                        var anim = CreateAnimation(liveConfig.AnimationStyle);
                         _overlayState.ShowRecording(anim);
                         await _pipeline.StartRecordingAsync(
-                            string.IsNullOrWhiteSpace(config.AudioDeviceId) ? null : config.AudioDeviceId);
+                            string.IsNullOrWhiteSpace(liveConfig.AudioDeviceId) ? null : liveConfig.AudioDeviceId);
                     }
                     else
                     {
@@ -374,6 +375,39 @@ public partial class App : Application
         _pipeline.StateChanged += (_, state) =>
         {
             _tray.SetRecording(state == PipelineState.Recording);
+        };
+
+        // ── Live config reload ────────────────────────────────────────────
+        configStore.ConfigChanged += (_, newConfig) =>
+        {
+            _island.Dispatcher.BeginInvoke(() =>
+            {
+                logger.LogInformation("Config changed — applying live updates");
+
+                // Re-register hotkey if changed
+                var newMod = ParseModifiers(newConfig.Hotkey.Modifiers);
+                var newKey = ParseKey(newConfig.Hotkey.Key);
+                if (newMod != modifiers || newKey != key)
+                {
+                    _hotkey?.Unregister();
+                    modifiers = newMod;
+                    key = newKey;
+                    if (_hotkey?.Register(modifiers, key) == true)
+                        logger.LogInformation("Hotkey re-registered: {Mod}+{Key}", modifiers, key);
+                    else
+                        logger.LogWarning("Failed to re-register hotkey {Mod}+{Key}", modifiers, key);
+                }
+
+                // Update silence timeout on VAD
+                if (vad is AmplitudeVad ampVadLive)
+                {
+                    // Cannot change silenceTimeoutMs on AmplitudeVad at runtime,
+                    // but RecordingSession reads _silenceTimeoutMs from config.
+                    // For now, log that restart is needed for STT/timeout changes.
+                }
+
+                logger.LogInformation("Live config applied (animation, audio device, hotkey)");
+            });
         };
 
         logger.LogInformation("Aether Voice started (STT: {Provider}, Hotkey: {Hotkey})",
