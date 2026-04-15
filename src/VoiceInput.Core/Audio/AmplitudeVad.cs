@@ -9,7 +9,7 @@ public sealed class AmplitudeVad : IVoiceActivityDetector
 {
     private readonly float _speechThreshold;
     private readonly int _silenceTimeoutMs;
-    private readonly int _sampleRate;
+    private int _sampleRate;
     private readonly int _debounceFrames;
 
     private int _consecutiveSilentFrames;
@@ -19,12 +19,12 @@ public sealed class AmplitudeVad : IVoiceActivityDetector
     /// <summary>
     /// Creates a new amplitude-based VAD.
     /// </summary>
-    /// <param name="speechThreshold">Normalized RMS threshold for speech detection (default 0.02, ~-34 dB).</param>
+    /// <param name="speechThreshold">Normalized RMS threshold for speech detection (default 0.005).</param>
     /// <param name="silenceTimeoutMs">Silence duration in ms before auto-stop (default 1500).</param>
     /// <param name="sampleRate">Expected sample rate for duration calculation (default 16000).</param>
     /// <param name="debounceFrames">Consecutive silent frames required before declaring silence (default 3).</param>
     public AmplitudeVad(
-        float speechThreshold = 0.02f,
+        float speechThreshold = 0.005f,
         int silenceTimeoutMs = 1500,
         int sampleRate = 16000,
         int debounceFrames = 3)
@@ -39,6 +39,11 @@ public sealed class AmplitudeVad : IVoiceActivityDetector
     /// The configured silence timeout in milliseconds.
     /// </summary>
     public int SilenceTimeoutMs => _silenceTimeoutMs;
+
+    /// <summary>
+    /// Update the sample rate once the actual capture format is known.
+    /// </summary>
+    public void SetSampleRate(int sampleRate) => _sampleRate = sampleRate;
 
     public VadResult ProcessSamples(short[] samples)
     {

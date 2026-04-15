@@ -38,6 +38,7 @@ public sealed class VoiceInputPipeline : IDisposable
     private readonly SynchronizationContext? _syncContext;
 
     private bool _disposed;
+    private int _recordingGeneration;
 
     public VoiceInputPipeline(
         IRecordingSession recording,
@@ -84,6 +85,7 @@ public sealed class VoiceInputPipeline : IDisposable
         try
         {
             SetState(PipelineState.Recording);
+            _recordingGeneration++;
             _recording.AmplitudeChanged += OnAmplitude;
             _recording.AutoStopped += OnAutoStopped;
             await _recording.StartAsync(deviceId);
@@ -131,7 +133,16 @@ public sealed class VoiceInputPipeline : IDisposable
 
             // Inject text (clipboard requires STA thread)
             SetState(PipelineState.Injecting);
-            await _injector.InjectAsync(text);
+            _logger.LogInformation("Injecting text: \"{Text}\"", text);
+            try
+            {
+                await _injector.InjectAsync(text);
+                _logger.LogInformation("Text injected successfully");
+            }
+            catch (Exception injEx)
+            {
+                _logger.LogError(injEx, "Text injection failed");
+            }
 
             sw.Stop();
 
@@ -191,13 +202,19 @@ public sealed class VoiceInputPipeline : IDisposable
 
     private void OnAutoStopped(object? sender, EventArgs e)
     {
-        _logger.LogInformation("OnAutoStopped fired, pipeline state: {State}", State);
-        // Must dispatch to captured SynchronizationContext (WPF Dispatcher)
-        // to avoid cross-thread COM access when stopping WASAPI capture.
+        var gen = _recordingGeneration;
+        _logger.LogInformation("OnAutoStopped fired, pipeline state: {State}, gen: {Gen}", State, gen);
         if (_syncContext != null)
         {
-            #pragma warning disable VSTHRD001 // SynchronizationContext.Post is the correct way to dispatch to UI from non-WPF code
-            _syncContext.Post(_ => ProcessAutoStop(), null);
+            #pragma warning disable VSTHRD001
+            _syncContext.Post(_ =>
+            {
+                // Only process if this is still the same recording generation
+                if (_recordingGeneration == gen && State == PipelineState.Recording)
+                    ProcessAutoStop();
+                else
+                    _logger.LogInformation("OnAutoStopped skipped — generation mismatch (was {Old}, now {New})", gen, _recordingGeneration);
+            }, null);
             #pragma warning restore VSTHRD001
         }
     }

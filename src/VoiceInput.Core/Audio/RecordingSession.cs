@@ -165,8 +165,13 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
 
         var count = Interlocked.Increment(ref _dataCallbackCount);
         if (count == 1)
-            _logger.LogInformation("First audio data callback: {Bytes} bytes, format: {Rate}Hz/{Bits}bit/{Ch}ch",
-                e.BytesRecorded, e.Format.SampleRate, e.Format.BitsPerSample, e.Format.Channels);
+        {
+            _logger.LogInformation("First audio data callback: {Bytes} bytes, format: {Rate}Hz/{Bits}bit/{Ch}ch (isFloat={IsFloat})",
+                e.BytesRecorded, e.Format.SampleRate, e.Format.BitsPerSample, e.Format.Channels, e.Format.IsFloat);
+            // Update VAD sample rate to match actual capture format
+            if (_vad is AmplitudeVad ampVad)
+                ampVad.SetSampleRate(e.Format.SampleRate);
+        }
 
         lock (_lock)
         {
