@@ -51,11 +51,14 @@ public sealed class SmartInjectionOrchestrator : IInjectionOrchestrator
             try
             {
                 _clipboard.SetText(text);
-                var result = await _injector.InjectTextAsync(text, targetWindow).ConfigureAwait(false);
+                // Small delay to let clipboard settle before sending Ctrl+V
+                await Task.Delay(50);
+                var result = await _injector.InjectTextAsync(text, targetWindow);
 
                 if (result == InjectionResult.Success)
                 {
-                    await Task.Delay(_pasteDelayMs).ConfigureAwait(false);
+                    // Wait for paste to be processed before restoring clipboard
+                    await Task.Delay(_pasteDelayMs);
                 }
 
                 return result;

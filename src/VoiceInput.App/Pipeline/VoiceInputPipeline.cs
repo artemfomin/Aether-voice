@@ -198,7 +198,12 @@ public sealed class VoiceInputPipeline : IDisposable
         StateChanged?.Invoke(this, state);
     }
 
-    private void OnAmplitude(object? sender, float amp) => AmplitudeChanged?.Invoke(this, amp);
+    private void OnAmplitude(object? sender, float amp)
+    {
+        // Amplify for visual feedback — raw int32 PCM gives tiny values (0.001-0.02)
+        var visual = Math.Clamp(amp * 50f, 0f, 1f);
+        AmplitudeChanged?.Invoke(this, visual);
+    }
 
     private void OnAutoStopped(object? sender, EventArgs e)
     {
