@@ -21,7 +21,7 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
     private readonly IAudioResampler _resampler;
     private readonly IVoiceActivityDetector _vad;
     private readonly ILogger _logger;
-    private readonly int _silenceTimeoutMs;
+    private volatile int _silenceTimeoutMs;
 
     private readonly object _lock = new();
     private MemoryStream? _buffer;
@@ -54,6 +54,9 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
     public RecordingState State => _state;
 
     public TimeSpan Duration => _stopwatch?.Elapsed ?? TimeSpan.Zero;
+
+    /// <summary>Update silence timeout at runtime (from config change event).</summary>
+    public void SetSilenceTimeout(int ms) => _silenceTimeoutMs = ms;
 
     public event EventHandler<float>? AmplitudeChanged;
     public event EventHandler? AutoStopped;

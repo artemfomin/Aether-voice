@@ -398,15 +398,14 @@ public partial class App : Application
                         logger.LogWarning("Failed to re-register hotkey {Mod}+{Key}", modifiers, key);
                 }
 
-                // Update silence timeout on VAD
-                if (vad is AmplitudeVad ampVadLive)
+                // Update silence timeout on RecordingSession
+                if (recording is RecordingSession rs)
                 {
-                    // Cannot change silenceTimeoutMs on AmplitudeVad at runtime,
-                    // but RecordingSession reads _silenceTimeoutMs from config.
-                    // For now, log that restart is needed for STT/timeout changes.
+                    rs.SetSilenceTimeout(newConfig.SilenceTimeoutMs);
+                    logger.LogInformation("Silence timeout updated: {Ms}ms", newConfig.SilenceTimeoutMs);
                 }
 
-                logger.LogInformation("Live config applied (animation, audio device, hotkey)");
+                logger.LogInformation("Live config applied (animation, audio device, hotkey, silence timeout)");
             });
         };
 
