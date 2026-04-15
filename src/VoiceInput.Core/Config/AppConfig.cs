@@ -18,6 +18,6 @@ public class AppConfig
     /// Silence timeout in milliseconds before VAD auto-stops recording.
     /// Default 3000ms (3 seconds). Increase for longer pauses between sentences.
     /// </summary>
-    /// <summary>0 = disabled (push-to-talk only). 1000-10000 = auto-stop after silence.</summary>
-    public int SilenceTimeoutMs { get; set; }
+    /// <summary>0 = disabled (push-to-talk only). 1000-10000 = auto-stop after silence. Default: 5000ms.</summary>
+    public int SilenceTimeoutMs { get; set; } = 5000;
 }

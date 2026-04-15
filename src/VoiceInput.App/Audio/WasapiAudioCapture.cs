@@ -132,7 +132,8 @@ public sealed class WasapiAudioCapture : IAudioCapture, IDisposable
     }
 
     private static CoreWaveFormat MapWaveFormat(NAudio.Wave.WaveFormat nf) =>
-        new(nf.SampleRate, nf.BitsPerSample, nf.Channels);
+        new(nf.SampleRate, nf.BitsPerSample, nf.Channels,
+            IsFloat: nf.Encoding == WaveFormatEncoding.IeeeFloat);
 
     private void DisposeCapture()
     {

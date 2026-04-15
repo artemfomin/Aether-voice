@@ -175,6 +175,18 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
         }
 
         // Feed VAD with int16 samples for amplitude detection
+        // Log raw float values on first callback for debugging
+        if (count == 1 && e.Format.BitsPerSample == 32 && e.BytesRecorded >= 20)
+        {
+            var f0 = BitConverter.ToSingle(e.Buffer, 0);
+            var f1 = BitConverter.ToSingle(e.Buffer, 4);
+            var f2 = BitConverter.ToSingle(e.Buffer, 8);
+            var f3 = BitConverter.ToSingle(e.Buffer, 12);
+            var f4 = BitConverter.ToSingle(e.Buffer, 16);
+            _logger.LogInformation("Raw float32 samples[0..4]: {F0:E3}, {F1:E3}, {F2:E3}, {F3:E3}, {F4:E3}",
+                f0, f1, f2, f3, f4);
+        }
+
         var samples = ConvertToInt16Samples(e.Buffer, e.BytesRecorded, e.Format);
         if (samples.Length > 0)
         {
@@ -193,9 +205,10 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
             }
 
             // VAD auto-stop: only if timeout > 0 (0 = disabled / push-to-talk only)
+            // Requires speech to be detected first, so it doesn't fire on initial silence
             if (_silenceTimeoutMs > 0 &&
+                !_autoStopFired &&
                 _speechDetected &&
-                _vad is AmplitudeVad ampVad &&
                 vadResult.SilenceDurationMs >= _silenceTimeoutMs &&
                 Duration > MinDuration)
             {
@@ -225,28 +238,52 @@ public sealed class RecordingSession : IRecordingSession, IDisposable
 
     private static short[] ConvertToInt16Samples(byte[] buffer, int bytesRecorded, WaveFormat format)
     {
-        if (format.BitsPerSample == 16)
-        {
-            int sampleCount = bytesRecorded / 2;
-            var samples = new short[sampleCount];
-            Buffer.BlockCopy(buffer, 0, samples, 0, sampleCount * 2);
-            return samples;
-        }
+        int bytesPerSample = format.BitsPerSample / 8;
+        int bytesPerFrame = format.Channels * bytesPerSample;
+        int frameCount = bytesRecorded / bytesPerFrame;
+        if (frameCount == 0) return [];
 
-        if (format.BitsPerSample == 32) // float32
+        var samples = new short[frameCount];
+
+        if (format.IsFloat && bytesPerSample == 4)
         {
-            int sampleCount = bytesRecorded / 4;
-            var samples = new short[sampleCount];
-            for (int i = 0; i < sampleCount; i++)
+            // IEEE float32 — take first channel only
+            for (int i = 0; i < frameCount; i++)
             {
-                float value = BitConverter.ToSingle(buffer, i * 4);
+                float value = BitConverter.ToSingle(buffer, i * bytesPerFrame);
                 samples[i] = (short)Math.Clamp(value * short.MaxValue, short.MinValue, short.MaxValue);
             }
-
-            return samples;
+        }
+        else if (bytesPerSample == 4)
+        {
+            // int32 PCM — take first channel, scale to int16
+            for (int i = 0; i < frameCount; i++)
+            {
+                int value = BitConverter.ToInt32(buffer, i * bytesPerFrame);
+                samples[i] = (short)(value >> 16); // top 16 bits
+            }
+        }
+        else if (bytesPerSample == 2)
+        {
+            // int16 PCM — take first channel
+            if (format.Channels == 1)
+            {
+                Buffer.BlockCopy(buffer, 0, samples, 0, frameCount * 2);
+            }
+            else
+            {
+                for (int i = 0; i < frameCount; i++)
+                {
+                    samples[i] = BitConverter.ToInt16(buffer, i * bytesPerFrame);
+                }
+            }
+        }
+        else
+        {
+            return [];
         }
 
-        return [];
+        return samples;
     }
 
     public void Dispose()

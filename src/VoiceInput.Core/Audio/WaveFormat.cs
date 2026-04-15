@@ -8,7 +8,7 @@ namespace VoiceInput.Core.Audio;
 /// <param name="SampleRate">Samples per second (e.g. 44100, 48000, 16000).</param>
 /// <param name="BitsPerSample">Bit depth per sample (e.g. 16, 32).</param>
 /// <param name="Channels">Number of audio channels (1 = mono, 2 = stereo).</param>
-public sealed record WaveFormat(int SampleRate, int BitsPerSample, int Channels)
+public sealed record WaveFormat(int SampleRate, int BitsPerSample, int Channels, bool IsFloat = false)
 {
     /// <summary>
     /// The 16 kHz, 16-bit, mono PCM format expected by Whisper STT models.
