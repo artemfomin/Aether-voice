@@ -39,10 +39,10 @@ jobs:
       - name: Test
         run: dotnet test ${{ env.TEST_PROJECT }} --no-build --configuration Release --verbosity normal
 
-  publish-msi:
+  publish-and-release:
     needs: build-and-test
     runs-on: windows-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
 
@@ -54,18 +54,24 @@ jobs:
       - name: Restore
         run: dotnet restore ${{ env.SOLUTION }}
 
-      # Determine version from tag or generate from run number
+      # Version: from tag (v1.2.3) or auto-generate (1.0.N.0)
       - name: Set version
         id: version
         shell: pwsh
         run: |
           if ("${{ github.ref }}" -match 'refs/tags/v(.+)') {
             $ver = $Matches[1]
+            $tag = "v$ver"
+            $prerelease = "false"
           } else {
             $ver = "1.0.${{ github.run_number }}.0"
+            $tag = "build-${{ github.run_number }}"
+            $prerelease = "true"
           }
           echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
-          Write-Host "Version: $ver"
+          echo "TAG=$tag" >> $env:GITHUB_OUTPUT
+          echo "PRERELEASE=$prerelease" >> $env:GITHUB_OUTPUT
+          Write-Host "Version: $ver, Tag: $tag, Prerelease: $prerelease"
 
       # Publish self-contained single-file
       - name: Publish
@@ -96,7 +102,7 @@ jobs:
             -d "SourceDir=${{ env.PUBLISH_DIR }}" `
             -o ${{ env.MSI_OUTPUT }}
 
-      # Upload MSI as build artifact (always on master push)
+      # Upload as build artifacts
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
@@ -104,7 +110,6 @@ jobs:
           path: ${{ env.MSI_OUTPUT }}
           retention-days: 90
 
-      # Upload standalone EXE as artifact too
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
@@ -112,61 +117,15 @@ jobs:
           path: ${{ env.PUBLISH_DIR }}/VoiceInput.App.exe
           retention-days: 90
 
-  # Create GitHub Release when a version tag is pushed
-  release:
-    needs: publish-msi
-    runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Restore
-        run: dotnet restore ${{ env.SOLUTION }}
-
-      - name: Set version
-        id: version
-        shell: pwsh
-        run: |
-          "${{ github.ref }}" -match 'refs/tags/v(.+)'
-          $ver = $Matches[1]
-          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
-
-      - name: Publish
-        run: >
-          dotnet publish ${{ env.APP_PROJECT }}
-          -c Release -r win-x64 --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
-          -p:PublishTrimmed=false
-          -p:Version=${{ steps.version.outputs.VERSION }}
-          -o ${{ env.PUBLISH_DIR }}
-
-      - name: Install WiX
-        shell: pwsh
-        run: |
-          dotnet tool install --global wix
-          wix eula accept wix7
-          wix extension add WixToolset.UI.wixext
-
-      - name: Build MSI
-        shell: pwsh
-        run: |
-          $env:Path += ";$env:USERPROFILE\.dotnet\tools"
-          wix build ${{ env.WIX_SRC }} `
-            -ext WixToolset.UI.wixext `
-            -d "SourceDir=${{ env.PUBLISH_DIR }}" `
-            -o ${{ env.MSI_OUTPUT }}
-
+      # Create GitHub Release (always — prerelease for master, stable for tags)
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: Aether Voice v${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.version.outputs.TAG }}
+          name: Aether Voice ${{ steps.version.outputs.VERSION }}
+          prerelease: ${{ steps.version.outputs.PRERELEASE == 'true' }}
           generate_release_notes: true
+          make_latest: ${{ steps.version.outputs.PRERELEASE == 'false' }}
           files: |
             ${{ env.MSI_OUTPUT }}
             ${{ env.PUBLISH_DIR }}/VoiceInput.App.exe
