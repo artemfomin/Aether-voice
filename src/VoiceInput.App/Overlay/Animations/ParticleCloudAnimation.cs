@@ -40,7 +40,7 @@ public sealed class ParticleCloudAnimation : IRecordingAnimation
         {
             Width = 48,
             Height = 48,
-            ClipToBounds = true,
+            ClipToBounds = false,
         };
         _particles = new Rectangle[ParticleCount];
         _px = new double[ParticleCount];
@@ -130,8 +130,8 @@ public sealed class ParticleCloudAnimation : IRecordingAnimation
 
             _vx[i] = (_vx[i] + bx) * 0.88;
             _vy[i] = (_vy[i] + by) * 0.88;
-            _px[i] = Math.Clamp(_px[i] + _vx[i], -2, 50);
-            _py[i] = Math.Clamp(_py[i] + _vy[i], -2, 50);
+            _px[i] += _vx[i];
+            _py[i] += _vy[i];
 
             Canvas.SetLeft(_particles[i], _px[i]);
             Canvas.SetTop(_particles[i], _py[i]);
